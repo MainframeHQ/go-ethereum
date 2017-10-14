@@ -171,7 +171,7 @@ func TestAddressMatch(t *testing.T) {
 	}
 	privkey, err := w.GetPrivateKey(keys)
 	pssp := NewPssParams(privkey)
-	ps := NewPss(kad, nil, pssp)
+	ps := NewPss(kad, nil, "", pssp)
 
 	pssmsg := &PssMsg{
 		To:      remoteaddr,
@@ -1002,7 +1002,14 @@ func setupNetwork(numnodes int) (clients []*rpc.Client, err error) {
 }
 
 func newServices() adapters.Services {
-	stateStore := newStateStore()
+	sdir, err := ioutil.TempDir("", "bzz-state")
+	if err != nil {
+		return nil
+	}
+	stateStore, err := newStateStore(sdir)
+	if err != nil {
+		return nil
+	}
 	kademlias := make(map[discover.NodeID]*network.Kademlia)
 	kademlia := func(id discover.NodeID) *network.Kademlia {
 		if k, ok := kademlias[id]; ok {
@@ -1029,14 +1036,17 @@ func newServices() adapters.Services {
 			if err != nil {
 				return nil, fmt.Errorf("local dpa creation failed", "error", err)
 			}
-
+			statedir, err := ioutil.TempDir("", "pss-state")
+			if err != nil {
+				return nil, fmt.Errorf("create pss cache stateir failed", "error", err)
+			}
 			ctxlocal, _ := context.WithTimeout(context.Background(), time.Second)
 			keys, err := wapi.NewKeyPair(ctxlocal)
 			privkey, err := w.GetPrivateKey(keys)
 			pssp := NewPssParams(privkey)
 			pssp.MsgTTL = time.Second * 30
 			pskad := kademlia(ctx.Config.ID)
-			ps := NewPss(pskad, dpa, pssp)
+			ps := NewPss(pskad, dpa, statedir, pssp)
 
 			ping := &Ping{
 				OutC: make(chan bool),
@@ -1099,7 +1109,11 @@ func newTestPss(privkey *ecdsa.PrivateKey, ppextra *PssParams) *Pss {
 		log.Error("local dpa creation failed", "error", err)
 		os.Exit(1)
 	}
-
+	statedir, err := ioutil.TempDir("", "pss-state")
+	if err != nil {
+		log.Error("create pss cache statedir failed", "error", err)
+		os.Exit(1)
+	}
 	// set up routing
 	kp := network.NewKadParams()
 	kp.MinProxBinSize = 3
@@ -1111,7 +1125,7 @@ func newTestPss(privkey *ecdsa.PrivateKey, ppextra *PssParams) *Pss {
 	}
 
 	overlay := network.NewKademlia(addr.Over(), kp)
-	ps := NewPss(overlay, dpa, pp)
+	ps := NewPss(overlay, dpa, statedir, pp)
 
 	return ps
 }

@@ -90,6 +90,7 @@ type Pss struct {
 	dpa             *storage.DPA      // we use swarm to store the cache
 	w               *whisper.Whisper  // key and encryption backend
 	auxAPIs         []rpc.API         // builtins (handshake, test) can add APIs
+	state           *stateStore
 
 	// sending and forwarding
 	fwdPool         map[string]*protocols.Peer  // keep track of all peers sitting on the pssmsg routing layer
@@ -121,8 +122,8 @@ func (self *Pss) String() string {
 //
 // In addition to params, it takes a swarm network overlay
 // and a DPA storage for message cache storage.
-func NewPss(k network.Overlay, dpa *storage.DPA, params *PssParams) *Pss {
-	return &Pss{
+func NewPss(k network.Overlay, dpa *storage.DPA, statestorepath string, params *PssParams) *Pss {
+	ps := &Pss{
 		Overlay:    k,
 		privateKey: params.privateKey,
 		dpa:        dpa,
@@ -142,6 +143,14 @@ func NewPss(k network.Overlay, dpa *storage.DPA, params *PssParams) *Pss {
 
 		handlers: make(map[whisper.TopicType]map[*Handler]bool),
 	}
+	if statestorepath != "" {
+		ss, err := newStateStore(statestorepath)
+		if err != nil {
+			log.Warn("Invalid pss statestore path. Session will not be loaded or saved", "err", err)
+		}
+		ps.state = ss
+	}
+	return ps
 }
 
 /////////////////////////////////////////////////////////////////////
