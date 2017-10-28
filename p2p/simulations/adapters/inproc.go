@@ -75,7 +75,7 @@ func (s *SimAdapter) NewNode(config *NodeConfig) (Node, error) {
 		}
 	}
 
-	n, err := node.New(&node.Config{
+	nodeConfig := &node.Config{
 		P2P: p2p.Config{
 			PrivateKey:      config.PrivateKey,
 			MaxPeers:        math.MaxInt32,
@@ -85,7 +85,16 @@ func (s *SimAdapter) NewNode(config *NodeConfig) (Node, error) {
 		},
 		NoUSB:  true,
 		Logger: log.New("node.id", id.String()),
-	})
+	}
+	if config.LogFile != "" {
+		handler, err := log.FileHandler(config.LogFile, log.LogfmtFormat())
+		if err != nil {
+			return nil, fmt.Errorf("error configuring logger", "err", err)
+		}
+		nodeConfig.Logger.SetHandler(handler)
+	}
+
+	n, err := node.New(nodeConfig)
 	if err != nil {
 		return nil, err
 	}

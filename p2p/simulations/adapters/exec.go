@@ -180,10 +180,20 @@ func (n *ExecNode) Start(snapshots map[string][]byte) (err error) {
 		return fmt.Errorf("error generating node config: %s", err)
 	}
 
-	// use a pipe for stderr so we can both copy the node's stderr to
-	// os.Stderr and read the WebSocket address from the logs
+	var stderr io.Writer = os.Stderr
+	if n.Config.Node.LogFile != "" {
+		logFile, err := os.OpenFile(n.Config.Node.LogFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+		if err != nil {
+			return fmt.Errorf("error opening log file %q: %s", n.Config.Node.LogFile, err)
+		}
+		stderr = logFile
+	}
+
+	// use a pipe for the node's stderr so we can both copy it to os.Stderr
+	// (or the log file if configured) and read the WebSocket address from
+	// the logs
 	stderrR, stderrW := io.Pipe()
-	stderr := io.MultiWriter(os.Stderr, stderrW)
+	stderr = io.MultiWriter(stderr, stderrW)
 
 	// start the node
 	cmd := n.newCmd()

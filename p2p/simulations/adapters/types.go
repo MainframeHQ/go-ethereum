@@ -97,6 +97,10 @@ type NodeConfig struct {
 
 	// function to sanction or prevent suggesting a peer
 	Reachable func(id discover.NodeID) bool
+
+	// LogFile is the path to a file to store the node logs rather than
+	// sending them to stderr
+	LogFile string
 }
 
 // nodeConfigJSON is used to encode and decode NodeConfig as JSON by encoding
