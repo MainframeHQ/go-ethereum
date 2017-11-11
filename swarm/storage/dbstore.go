@@ -44,17 +44,17 @@ const (
 
 	gcArraySize      = 10000
 	gcArrayFreeRatio = 0.1
-
-	// key prefixes for leveldb storage
-	kpIndex = 0
-	kpData  = 1
 )
 
-var (
-	keyAccessCnt = []byte{2}
-	keyEntryCnt  = []byte{3}
-	keyDataIdx   = []byte{4}
-	keyGCPos     = []byte{5}
+const (
+	DB_INDEX = 0
+	DB_COUNT_ACCESS = 1
+	DB_COUNT_ENTRY = 2
+	DB_GC = 3
+	DB_ENTRY_DATAIDX = 4
+	DB_ENTRY_DATA = 5
+	DB_ENTRY_RESOURCEIDX = 8
+	DB_ENTRY_RESOURCE = 9
 )
 
 type gcItem struct {
@@ -66,7 +66,7 @@ type gcItem struct {
 type DbStore struct {
 	db *LDBDatabase
 
-	// this should be stored in db, accessed transactionally
+// this should be stored in db, accessed transactionally
 	entryCnt, accessCnt, dataIdx, capacity uint64
 
 	gcPos, gcStartPos []byte
@@ -90,10 +90,10 @@ func NewDbStore(path string, hash SwarmHasher, capacity uint64, radius int) (s *
 	s.setCapacity(capacity)
 
 	s.gcStartPos = make([]byte, 1)
-	s.gcStartPos[0] = kpIndex
+	s.gcStartPos[0] = DB_INDEX
 	s.gcArray = make([]*gcItem, gcArraySize)
 
-	data, _ := s.db.Get(keyEntryCnt)
+	data, _ := s.db.Get(DB_ENTRY)
 	s.entryCnt = BytesToU64(data)
 	if len(data) > 0 {
 		s.entryCnt++
@@ -141,17 +141,26 @@ func (s *DbStore) updateIndexAccess(index *dpaDBIndex) {
 	index.Access = s.accessCnt
 }
 
-func getIndexKey(hash Key) []byte {
+func getIndexKey(hash Key, typ uint8) []byte {
 	HashSize := len(hash)
-	key := make([]byte, HashSize+1)
-	key[0] = 0
-	copy(key[1:], hash[:])
+	key := make([]byte, HashSize+2)
+	key[0] = kpResource
+	key[2] = typ
+	copy(key[2:], hash[:])
 	return key
 }
 
 func getDataKey(idx uint64) []byte {
 	key := make([]byte, 9)
-	key[0] = 1
+	key[0] = kpData
+	binary.BigEndian.PutUint64(key[1:9], idx)
+
+	return key
+}
+
+func getResourceKey(idx uint64) []byte {
+	key := make([]byte, 9)
+	key[0] = kpResource
 	binary.BigEndian.PutUint64(key[1:9], idx)
 
 	return key
@@ -403,11 +412,20 @@ func (s *DbStore) Counter() uint64 {
 	return s.dataIdx
 }
 
-func (s *DbStore) Put(chunk *Chunk) {
+// typ is
+func (s *DbStore) Put(chunk *Chunk, entrytype uint8) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
-	ikey := getIndexKey(chunk.Key)
+	var typ uint8
+	idxcnt := 
+	if entrytype == ENTRY_RESOURCE {
+		typ = kpResource
+		idxcnt = 
+	} else {
+		typ = kpData
+	}
+	ikey := getIndexKey(chunk.Key, typ)
 	var index dpaDBIndex
 
 	if s.tryAccessIdx(ikey, &index) {
