@@ -131,7 +131,7 @@ func (s *MemStore) setCapacity(c uint) {
 }
 
 // entry (not its copy) is going to be in MemStore
-func (s *MemStore) Put(entry *Chunk) {
+func (s *MemStore) Put(entry *Chunk, entrytype uint8) {
 	if s.capacity == 0 {
 		return
 	}

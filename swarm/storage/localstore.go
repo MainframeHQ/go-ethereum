@@ -41,14 +41,14 @@ func NewLocalStore(hash SwarmHasher, params *StoreParams) (*LocalStore, error) {
 
 // LocalStore is itself a chunk store
 // unsafe, in that the data is not integrity checked
-func (self *LocalStore) Put(chunk *Chunk) {
+func (self *LocalStore) Put(chunk *Chunk, entrytype uint8) {
 	chunk.dbStored = make(chan bool)
-	self.memStore.Put(chunk)
+	self.memStore.Put(chunk, entrytype)
 	if chunk.wg != nil {
 		chunk.wg.Add(1)
 	}
 	go func() {
-		self.DbStore.Put(chunk)
+		self.DbStore.Put(chunk, entrytype)
 		if chunk.wg != nil {
 			chunk.wg.Done()
 		}
@@ -59,17 +59,17 @@ func (self *LocalStore) Put(chunk *Chunk) {
 // This method is blocking until the chunk is retrieved
 // so additional timeout may be needed to wrap this call if
 // ChunkStores are remote and can have long latency
-func (self *LocalStore) Get(key Key) (chunk *Chunk, err error) {
-	chunk, err = self.memStore.Get(key)
+func (self *LocalStore) Get(key Key, entrytype uint8) (chunk *Chunk, err error) {
+	chunk, err = self.memStore.Get(key, entrytype)
 	if err == nil {
 		return
 	}
-	chunk, err = self.DbStore.Get(key)
+	chunk, err = self.DbStore.Get(key, entrytype)
 	if err != nil {
 		return
 	}
 	chunk.Size = int64(binary.LittleEndian.Uint64(chunk.SData[0:8]))
-	self.memStore.Put(chunk)
+	self.memStore.Put(chunk, entrytype)
 	return
 }
 

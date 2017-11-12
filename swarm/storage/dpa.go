@@ -132,15 +132,16 @@ func (self *DPA) Stop() {
 // retrieve channel to its ChunkStore  (NetStore or LocalStore)
 func (self *DPA) retrieveLoop() {
 	for i := 0; i < maxRetrieveProcesses; i++ {
-		go self.retrieveWorker()
+		go self.retrieveWorker(DB_DATA)
+		go self.retrieveWorker(DB_RESOURCE)
 	}
 	log.Trace(fmt.Sprintf("dpa: retrieve loop spawning %v workers", maxRetrieveProcesses))
 }
 
-func (self *DPA) retrieveWorker() {
+func (self *DPA) retrieveWorker(entrytype uint8) {
 	for chunk := range self.retrieveC {
 		log.Trace(fmt.Sprintf("dpa: retrieve loop : chunk %v", chunk.Key.Log()))
-		storedChunk, err := self.Get(chunk.Key)
+		storedChunk, err := self.Get(chunk.Key, entrytype)
 		if err == notFound {
 			log.Trace(fmt.Sprintf("chunk %v not found", chunk.Key.Log()))
 		} else if err != nil {
@@ -163,15 +164,16 @@ func (self *DPA) retrieveWorker() {
 // received on the store channel to its ChunkStore (NetStore or LocalStore)
 func (self *DPA) storeLoop() {
 	for i := 0; i < maxStoreProcesses; i++ {
-		go self.storeWorker()
+		go self.storeWorker(DB_DATA)
+		go self.storeWorker(DB_RESOURCE)
 	}
 	log.Trace(fmt.Sprintf("dpa: store spawning %v workers", maxStoreProcesses))
 }
 
-func (self *DPA) storeWorker() {
+func (self *DPA) storeWorker(entrytype uint8) {
 
 	for chunk := range self.storeC {
-		self.Put(chunk)
+		self.Put(chunk, entrytype)
 		if chunk.wg != nil {
 			log.Trace(fmt.Sprintf("dpa: store processor %v", chunk.Key.Log()))
 			chunk.wg.Done()
@@ -202,8 +204,8 @@ func NewDpaChunkStore(localStore, netStore ChunkStore) *dpaChunkStore {
 
 // Get is the entrypoint for local retrieve requests
 // waits for response or times out
-func (self *dpaChunkStore) Get(key Key) (chunk *Chunk, err error) {
-	chunk, err = self.netStore.Get(key)
+func (self *dpaChunkStore) Get(key Key, entrytype uint8) (chunk *Chunk, err error) {
+	chunk, err = self.netStore.Get(key, entrytype)
 	// timeout := time.Now().Add(searchTimeout)
 	if chunk.SData != nil {
 		log.Trace(fmt.Sprintf("DPA.Get: %v found locally, %d bytes", key.Log(), len(chunk.SData)))
@@ -222,8 +224,8 @@ func (self *dpaChunkStore) Get(key Key) (chunk *Chunk, err error) {
 }
 
 // Put is the entrypoint for local store requests coming from storeLoop
-func (self *dpaChunkStore) Put(entry *Chunk) {
-	chunk, err := self.localStore.Get(entry.Key)
+func (self *dpaChunkStore) Put(entry *Chunk, entrytype uint8) {
+	chunk, err := self.localStore.Get(entry.Key, entrytype)
 	if err != nil {
 		log.Trace(fmt.Sprintf("DPA.Put: %v new chunk. call netStore.Put", entry.Key.Log()))
 		chunk = entry
@@ -238,7 +240,7 @@ func (self *dpaChunkStore) Put(entry *Chunk) {
 	// from this point on the storage logic is the same with network storage requests
 	log.Trace(fmt.Sprintf("DPA.Put %v: %v", self.n, chunk.Key.Log()))
 	self.n++
-	self.netStore.Put(chunk)
+	self.netStore.Put(chunk, entrytype)
 }
 
 // Close chunk store

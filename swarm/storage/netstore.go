@@ -91,8 +91,8 @@ var (
 // ~ unsafe put in localdb no check if exists no extra copy no hash validation
 // the chunk is forced to propagate (Cloud.Store) even if locally found!
 // caller needs to make sure if that is wanted
-func (self *NetStore) Put(entry *Chunk) {
-	self.localStore.Put(entry)
+func (self *NetStore) Put(entry *Chunk, entrytype uint8) {
+	self.localStore.Put(entry, entrytype)
 
 	// handle deliveries
 	if entry.Req != nil {
@@ -111,9 +111,9 @@ func (self *NetStore) Put(entry *Chunk) {
 }
 
 // retrieve logic common for local and network chunk retrieval requests
-func (self *NetStore) Get(key Key) (*Chunk, error) {
+func (self *NetStore) Get(key Key, entrytype uint8) (*Chunk, error) {
 	var err error
-	chunk, err := self.localStore.Get(key)
+	chunk, err := self.localStore.Get(key, entrytype)
 	if err == nil {
 		if chunk.Req == nil {
 			log.Trace(fmt.Sprintf("NetStore.Get: %v found locally", key))
@@ -126,7 +126,7 @@ func (self *NetStore) Get(key Key) (*Chunk, error) {
 	// no data and no request status
 	log.Trace(fmt.Sprintf("NetStore.Get: %v not found locally. open new request", key))
 	chunk = NewChunk(key, newRequestStatus(key))
-	self.localStore.memStore.Put(chunk)
+	self.localStore.memStore.Put(chunk, entrytype)
 	go self.cloud.Retrieve(chunk)
 	return chunk, nil
 }

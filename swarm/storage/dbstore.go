@@ -23,13 +23,13 @@
 package storage
 
 import (
-	"archive/tar"
+	//"archive/tar"
 	"bytes"
 	"encoding/binary"
-	"encoding/hex"
+	//"encoding/hex"
 	"fmt"
-	"io"
-	"io/ioutil"
+	//"io"
+	//"io/ioutil"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/log"
@@ -44,18 +44,55 @@ const (
 
 	gcArraySize      = 10000
 	gcArrayFreeRatio = 0.1
+
+	dbVersion = 3
+	dbTypes   = 2
 )
 
+// unallocated for new types: [3,6]
 const (
-	DB_INDEX = 0
-	DB_COUNT_ACCESS = 1
-	DB_COUNT_ENTRY = 2
-	DB_GC = 3
-	DB_ENTRY_DATAIDX = 4
-	DB_ENTRY_DATA = 5
-	DB_ENTRY_RESOURCEIDX = 8
-	DB_ENTRY_RESOURCE = 9
+	DB_GC      = 0
+	DB_VERSION = 0xff
+
+	DB_DATA     = 2
+	DB_RESOURCE = 3
 )
+
+// cannot be 1, GC key is upper boundary
+func isValidEntrytype(entrytype uint8) bool {
+	if entrytype == 1 && entrytype > 6 {
+		return false
+	}
+	return true
+}
+
+func getDataPrefix(entrytype uint8) []byte {
+	if !isValidEntrytype(entrytype) {
+		return nil
+	}
+	return []byte{1 << entrytype}
+}
+
+func getIndexPrefix(entrytype uint8) []byte {
+	if !isValidEntrytype(entrytype) {
+		return nil
+	}
+	return []byte{(1 << entrytype) + 1}
+}
+
+func getEntryPrefix(entrytype uint8) []byte {
+	if !isValidEntrytype(entrytype) {
+		return nil
+	}
+	return []byte{(1 << entrytype) + 2}
+}
+
+func getAccessPrefix(entrytype uint8) []byte {
+	if !isValidEntrytype(entrytype) {
+		return nil
+	}
+	return []byte{(1 << entrytype) + 3}
+}
 
 type gcItem struct {
 	idx    uint64
@@ -63,14 +100,23 @@ type gcItem struct {
 	idxKey []byte
 }
 
+type dbCursor struct {
+	entry  uint64
+	access uint64
+	gc     []byte
+}
+
 type DbStore struct {
 	db *LDBDatabase
 
-// this should be stored in db, accessed transactionally
-	entryCnt, accessCnt, dataIdx, capacity uint64
+	// this should be stored in db, accessed transactionally
+	dataIdx, capacity, version uint64
 
-	gcPos, gcStartPos []byte
-	gcArray           []*gcItem
+	gcStartPos []byte
+	gcArray    []*gcItem
+
+	// counters for each data type
+	cursor []*dbCursor
 
 	hashfunc SwarmHasher
 
@@ -87,30 +133,42 @@ func NewDbStore(path string, hash SwarmHasher, capacity uint64, radius int) (s *
 		return
 	}
 
+	v, err := s.db.Get([]byte{DB_VERSION})
+	if err != nil {
+		return nil, fmt.Errorf("obsolete db < v3, please upgrade")
+	}
+	s.version = BytesToU64(v)
+	if s.version != dbVersion {
+		return nil, fmt.Errorf("obsolete db v%d, please upgrade", s.version)
+	}
+
 	s.setCapacity(capacity)
 
 	s.gcStartPos = make([]byte, 1)
-	s.gcStartPos[0] = DB_INDEX
+	s.gcStartPos[0] = 0
 	s.gcArray = make([]*gcItem, gcArraySize)
 
-	data, _ := s.db.Get(DB_ENTRY)
-	s.entryCnt = BytesToU64(data)
-	if len(data) > 0 {
-		s.entryCnt++
-	}
-	data, _ = s.db.Get(keyAccessCnt)
-	s.accessCnt = BytesToU64(data)
-	if len(data) > 0 {
-		s.accessCnt++
-	}
-	data, _ = s.db.Get(keyDataIdx)
-	s.dataIdx = BytesToU64(data)
-	if len(data) > 0 {
-		s.dataIdx++
-	}
-	s.gcPos, _ = s.db.Get(keyGCPos)
-	if s.gcPos == nil {
-		s.gcPos = s.gcStartPos
+	gc, _ := s.db.Get([]byte{DB_GC})
+	for i, typ := range []uint8{DB_DATA, DB_RESOURCE} {
+		cursor := &dbCursor{}
+		entry, _ := s.db.Get(getEntryPrefix(typ))
+		if len(entry) > 0 {
+			cursor.entry = BytesToU64(entry)
+			if cursor.entry > 0 {
+				cursor.entry++
+			}
+		}
+		access, _ := s.db.Get(getAccessPrefix(typ))
+		if len(access) > 0 {
+			cursor.access = BytesToU64(access)
+			if cursor.access > 0 {
+				cursor.access++
+			}
+		}
+		if len(gc) > 0 {
+			cursor.gc = gc[i : i+8]
+		}
+		s.cursor = append(s.cursor, cursor)
 	}
 	return
 }
@@ -137,33 +195,36 @@ func getIndexGCValue(index *dpaDBIndex) uint64 {
 	return index.Access
 }
 
-func (s *DbStore) updateIndexAccess(index *dpaDBIndex) {
-	index.Access = s.accessCnt
+func getDataKey(idx uint64, entrytype uint8) []byte {
+	pf := getDataPrefix(entrytype)
+	if pf == nil {
+		return nil
+	}
+	key := make([]byte, 9)
+	key[0] = pf[0]
+	binary.BigEndian.PutUint64(key[1:9], idx)
+	return key
 }
 
-func getIndexKey(hash Key, typ uint8) []byte {
+func getIndexKey(hash Key, entrytype uint8) []byte {
+	pf := getIndexPrefix(entrytype)
+	if pf == nil {
+		return pf
+	}
 	HashSize := len(hash)
-	key := make([]byte, HashSize+2)
-	key[0] = kpResource
-	key[2] = typ
-	copy(key[2:], hash[:])
+	key := make([]byte, HashSize+1)
+	key[0] = pf[0]
+	copy(key[1:], hash[:])
 	return key
+
 }
 
-func getDataKey(idx uint64) []byte {
-	key := make([]byte, 9)
-	key[0] = kpData
-	binary.BigEndian.PutUint64(key[1:9], idx)
-
-	return key
+func (s *DbStore) getAccessCount(entrytype uint8) uint64 {
+	return s.cursor[entrytype-2].access
 }
 
-func getResourceKey(idx uint64) []byte {
-	key := make([]byte, 9)
-	key[0] = kpResource
-	binary.BigEndian.PutUint64(key[1:9], idx)
-
-	return key
+func (s *DbStore) getEntryCount(entrytype uint8) uint64 {
+	return s.cursor[entrytype-2].entry
 }
 
 func encodeIndex(index *dpaDBIndex) []byte {
@@ -222,213 +283,216 @@ func gcListSelect(list []*gcItem, left int, right int, n int) int {
 	}
 }
 
+// TODO: only collect garbage on total capacity exceeded (all data types)
 func (s *DbStore) collectGarbage(ratio float32) {
-	it := s.db.NewIterator()
-	it.Seek(s.gcPos)
-	if it.Valid() {
-		s.gcPos = it.Key()
-	} else {
-		s.gcPos = nil
-	}
-	gcnt := 0
-
-	for (gcnt < gcArraySize) && (uint64(gcnt) < s.entryCnt) {
-
-		if (s.gcPos == nil) || (s.gcPos[0] != kpIndex) {
-			it.Seek(s.gcStartPos)
-			if it.Valid() {
-				s.gcPos = it.Key()
-			} else {
-				s.gcPos = nil
-			}
-		}
-
-		if (s.gcPos == nil) || (s.gcPos[0] != kpIndex) {
-			break
-		}
-
-		gci := new(gcItem)
-		gci.idxKey = s.gcPos
-		var index dpaDBIndex
-		decodeIndex(it.Value(), &index)
-		gci.idx = index.Idx
-		// the smaller, the more likely to be gc'd
-		gci.value = getIndexGCValue(&index)
-		s.gcArray[gcnt] = gci
-		gcnt++
-		it.Next()
+	newgccount := make([]byte, len(s.cursor)*8)
+	for i, cursor := range s.cursor {
+		it := s.db.NewIterator()
+		it.Seek(cursor.gc)
 		if it.Valid() {
-			s.gcPos = it.Key()
+			cursor.gc = it.Key()
 		} else {
-			s.gcPos = nil
+			cursor.gc = nil
 		}
-	}
-	it.Release()
+		gcnt := 0
 
-	cutidx := gcListSelect(s.gcArray, 0, gcnt-1, int(float32(gcnt)*ratio))
-	cutval := s.gcArray[cutidx].value
+		for (gcnt < gcArraySize) && (uint64(gcnt) < cursor.entry) {
 
-	// fmt.Print(gcnt, " ", s.entryCnt, " ")
+			if (cursor.gc == nil) || (cursor.gc[0] != 0) {
+				it.Seek(s.gcStartPos)
+				if it.Valid() {
+					cursor.gc = it.Key()
+				} else {
+					cursor.gc = nil
+				}
+			}
 
-	// actual gc
-	for i := 0; i < gcnt; i++ {
-		if s.gcArray[i].value <= cutval {
-			s.delete(s.gcArray[i].idx, s.gcArray[i].idxKey)
-		}
-	}
+			if (cursor.gc == nil) || (cursor.gc[0] != 0) {
+				break
+			}
 
-	// fmt.Println(s.entryCnt)
-
-	s.db.Put(keyGCPos, s.gcPos)
-}
-
-// Export writes all chunks from the store to a tar archive, returning the
-// number of chunks written.
-func (s *DbStore) Export(out io.Writer) (int64, error) {
-	tw := tar.NewWriter(out)
-	defer tw.Close()
-
-	it := s.db.NewIterator()
-	defer it.Release()
-	var count int64
-	for ok := it.Seek([]byte{kpIndex}); ok; ok = it.Next() {
-		key := it.Key()
-		if (key == nil) || (key[0] != kpIndex) {
-			break
-		}
-
-		var index dpaDBIndex
-		decodeIndex(it.Value(), &index)
-
-		data, err := s.db.Get(getDataKey(index.Idx))
-		if err != nil {
-			log.Warn(fmt.Sprintf("Chunk %x found but could not be accessed: %v", key[:], err))
-			continue
-		}
-
-		hdr := &tar.Header{
-			Name: hex.EncodeToString(key[1:]),
-			Mode: 0644,
-			Size: int64(len(data)),
-		}
-		if err := tw.WriteHeader(hdr); err != nil {
-			return count, err
-		}
-		if _, err := tw.Write(data); err != nil {
-			return count, err
-		}
-		count++
-	}
-
-	return count, nil
-}
-
-// Import reads chunks into the store from a tar archive, returning the number
-// of chunks read.
-func (s *DbStore) Import(in io.Reader) (int64, error) {
-	tr := tar.NewReader(in)
-
-	var count int64
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		} else if err != nil {
-			return count, err
-		}
-
-		if len(hdr.Name) != 64 {
-			log.Warn("ignoring non-chunk file", "name", hdr.Name)
-			continue
-		}
-
-		key, err := hex.DecodeString(hdr.Name)
-		if err != nil {
-			log.Warn("ignoring invalid chunk file", "name", hdr.Name, "err", err)
-			continue
-		}
-
-		data, err := ioutil.ReadAll(tr)
-		if err != nil {
-			return count, err
-		}
-
-		s.Put(&Chunk{Key: key, SData: data})
-		count++
-	}
-
-	return count, nil
-}
-
-func (s *DbStore) Cleanup() {
-	//Iterates over the database and checks that there are no faulty chunks
-	it := s.db.NewIterator()
-	startPosition := []byte{kpIndex}
-	it.Seek(startPosition)
-	var key []byte
-	var errorsFound, total int
-	for it.Valid() {
-		key = it.Key()
-		if (key == nil) || (key[0] != kpIndex) {
-			break
-		}
-		total++
-		var index dpaDBIndex
-		decodeIndex(it.Value(), &index)
-
-		data, err := s.db.Get(getDataKey(index.Idx))
-		if err != nil {
-			log.Warn(fmt.Sprintf("Chunk %x found but could not be accessed: %v", key[:], err))
-			s.delete(index.Idx, getIndexKey(key[1:]))
-			errorsFound++
-		} else {
-			hasher := s.hashfunc()
-			hasher.Write(data)
-			hash := hasher.Sum(nil)
-			if !bytes.Equal(hash, key[1:]) {
-				log.Warn(fmt.Sprintf("Found invalid chunk. Hash mismatch. hash=%x, key=%x", hash, key[:]))
-				s.delete(index.Idx, getIndexKey(key[1:]))
-				errorsFound++
+			gci := new(gcItem)
+			gci.idxKey = cursor.gc
+			var index dpaDBIndex
+			decodeIndex(it.Value(), &index)
+			gci.idx = index.Idx
+			// the smaller, the more likely to be gc'd
+			gci.value = getIndexGCValue(&index)
+			s.gcArray[gcnt] = gci
+			gcnt++
+			it.Next()
+			if it.Valid() {
+				cursor.gc = it.Key()
+			} else {
+				cursor.gc = nil
 			}
 		}
-		it.Next()
+		it.Release()
+
+		cutidx := gcListSelect(s.gcArray, 0, gcnt-1, int(float32(gcnt)*ratio))
+		cutval := s.gcArray[cutidx].value
+
+		// fmt.Print(gcnt, " ", s.entryCnt, " ")
+
+		// actual gc
+		for i := 0; i < gcnt; i++ {
+			if s.gcArray[i].value <= cutval {
+				s.delete(s.gcArray[i].idx, s.gcArray[i].idxKey, uint8(i+2))
+			}
+		}
+		copy(newgccount[i*8:(i*8)+8], cursor.gc)
+		// fmt.Println(s.entryCnt)
+
 	}
-	it.Release()
-	log.Warn(fmt.Sprintf("Found %v errors out of %v entries", errorsFound, total))
+
+	s.db.Put([]byte{DB_GC}, newgccount)
 }
 
-func (s *DbStore) delete(idx uint64, idxKey []byte) {
+//// Export writes all chunks from the store to a tar archive, returning the
+//// number of chunks written.
+//func (s *DbStore) Export(out io.Writer) (int64, error) {
+//	tw := tar.NewWriter(out)
+//	defer tw.Close()
+//
+//	it := s.db.NewIterator()
+//	defer it.Release()
+//	var count int64
+//	for ok := it.Seek([]byte{kpIndex}); ok; ok = it.Next() {
+//		key := it.Key()
+//		if (key == nil) || (key[0] != kpIndex) {
+//			break
+//		}
+//
+//		var index dpaDBIndex
+//		decodeIndex(it.Value(), &index)
+//
+//		data, err := s.db.Get(getDataKey(index.Idx))
+//		if err != nil {
+//			log.Warn(fmt.Sprintf("Chunk %x found but could not be accessed: %v", key[:], err))
+//			continue
+//		}
+//
+//		hdr := &tar.Header{
+//			Name: hex.EncodeToString(key[1:]),
+//			Mode: 0644,
+//			Size: int64(len(data)),
+//		}
+//		if err := tw.WriteHeader(hdr); err != nil {
+//			return count, err
+//		}
+//		if _, err := tw.Write(data); err != nil {
+//			return count, err
+//		}
+//		count++
+//	}
+//
+//	return count, nil
+//}
+//
+//// Import reads chunks into the store from a tar archive, returning the number
+//// of chunks read.
+//func (s *DbStore) Import(in io.Reader) (int64, error) {
+//	tr := tar.NewReader(in)
+//
+//	var count int64
+//	for {
+//		hdr, err := tr.Next()
+//		if err == io.EOF {
+//			break
+//		} else if err != nil {
+//			return count, err
+//		}
+//
+//		if len(hdr.Name) != 64 {
+//			log.Warn("ignoring non-chunk file", "name", hdr.Name)
+//			continue
+//		}
+//
+//		key, err := hex.DecodeString(hdr.Name)
+//		if err != nil {
+//			log.Warn("ignoring invalid chunk file", "name", hdr.Name, "err", err)
+//			continue
+//		}
+//
+//		data, err := ioutil.ReadAll(tr)
+//		if err != nil {
+//			return count, err
+//		}
+//
+//		s.Put(&Chunk{Key: key, SData: data})
+//		count++
+//	}
+//
+//	return count, nil
+//}
+
+//func (s *DbStore) Cleanup() {
+//	//Iterates over the database and checks that there are no faulty chunks
+//	it := s.db.NewIterator()
+//	startPosition := []byte{kpIndex}
+//	it.Seek(startPosition)
+//	var key []byte
+//	var errorsFound, total int
+//	for it.Valid() {
+//		key = it.Key()
+//		if (key == nil) || (key[0] != kpIndex) {
+//			break
+//		}
+//		total++
+//		var index dpaDBIndex
+//		decodeIndex(it.Value(), &index)
+//
+//		data, err := s.db.Get(getDataKey(index.Idx))
+//		if err != nil {
+//			log.Warn(fmt.Sprintf("Chunk %x found but could not be accessed: %v", key[:], err))
+//			s.delete(index.Idx, getIndexKey(key[1:]))
+//			errorsFound++
+//		} else {
+//			hasher := s.hashfunc()
+//			hasher.Write(data)
+//			hash := hasher.Sum(nil)
+//			if !bytes.Equal(hash, key[1:]) {
+//				log.Warn(fmt.Sprintf("Found invalid chunk. Hash mismatch. hash=%x, key=%x", hash, key[:]))
+//				s.delete(index.Idx, getIndexKey(key[1:]))
+//				errorsFound++
+//			}
+//		}
+//		it.Next()
+//	}
+//	it.Release()
+//	log.Warn(fmt.Sprintf("Found %v errors out of %v entries", errorsFound, total))
+//}
+
+func (s *DbStore) delete(idx uint64, idxHash []byte, entrytype uint8) {
+	ikey := getIndexKey(idxHash, entrytype)
+	if ikey == nil {
+		return
+	}
+	dkey := getDataKey(idx, entrytype)
+	if dkey == nil {
+		return
+	}
 	batch := new(leveldb.Batch)
-	batch.Delete(idxKey)
-	batch.Delete(getDataKey(idx))
-	s.entryCnt--
-	batch.Put(keyEntryCnt, U64ToBytes(s.entryCnt))
+	batch.Delete(ikey)
+	batch.Delete(dkey)
 	s.db.Write(batch)
 }
 
-func (s *DbStore) Counter() uint64 {
-	s.lock.Lock()
-	defer s.lock.Unlock()
-	return s.dataIdx
-}
+//func (s *DbStore) Counter() uint64 {
+//	s.lock.Lock()
+//	defer s.lock.Unlock()
+//	return s.dataIdx
+//}
 
-// typ is
 func (s *DbStore) Put(chunk *Chunk, entrytype uint8) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
-	var typ uint8
-	idxcnt := 
-	if entrytype == ENTRY_RESOURCE {
-		typ = kpResource
-		idxcnt = 
-	} else {
-		typ = kpData
-	}
-	ikey := getIndexKey(chunk.Key, typ)
+	ikey := getIndexKey(chunk.Key, entrytype)
+
 	var index dpaDBIndex
 
-	if s.tryAccessIdx(ikey, &index) {
+	if s.tryAccessIdx(ikey, &index, entrytype) {
 		if chunk.dbStored != nil {
 			close(chunk.dbStored)
 		}
@@ -439,36 +503,37 @@ func (s *DbStore) Put(chunk *Chunk, entrytype uint8) {
 	data := encodeData(chunk)
 	//data := ethutil.Encode([]interface{}{entry})
 
-	if s.entryCnt >= s.capacity {
+	if s.cursor[entrytype-2].entry >= s.capacity {
 		s.collectGarbage(gcArrayFreeRatio)
 	}
 
 	batch := new(leveldb.Batch)
 
-	batch.Put(getDataKey(s.dataIdx), data)
+	batch.Put(getDataKey(s.dataIdx, entrytype), data)
 
 	index.Idx = s.dataIdx
-	s.updateIndexAccess(&index)
 
 	idata := encodeIndex(&index)
 	batch.Put(ikey, idata)
 
-	batch.Put(keyEntryCnt, U64ToBytes(s.entryCnt))
-	s.entryCnt++
-	batch.Put(keyDataIdx, U64ToBytes(s.dataIdx))
-	s.dataIdx++
-	batch.Put(keyAccessCnt, U64ToBytes(s.accessCnt))
-	s.accessCnt++
+	batch.Put(getEntryPrefix(entrytype), U64ToBytes(s.cursor[entrytype-2].entry))
+	s.cursor[entrytype-2].entry++
+
+	batch.Put(getAccessPrefix(entrytype), U64ToBytes(s.cursor[entrytype-2].access))
+	s.cursor[entrytype-2].access++
 
 	s.db.Write(batch)
+
 	if chunk.dbStored != nil {
 		close(chunk.dbStored)
 	}
+
 	log.Trace(fmt.Sprintf("DbStore.Put: %v. db storage counter: %v ", chunk.Key.Log(), s.dataIdx))
 }
 
 // try to find index; if found, update access cnt and return true
-func (s *DbStore) tryAccessIdx(ikey []byte, index *dpaDBIndex) bool {
+//func (s *DbStore) tryAccessIdx(ikey []byte, index *dpaDBIndex, entrytype uint8) bool {
+func (s *DbStore) tryAccessIdx(ikey []byte, index *dpaDBIndex, entrytype uint8) bool {
 	idata, err := s.db.Get(ikey)
 	if err != nil {
 		return false
@@ -477,9 +542,8 @@ func (s *DbStore) tryAccessIdx(ikey []byte, index *dpaDBIndex) bool {
 
 	batch := new(leveldb.Batch)
 
-	batch.Put(keyAccessCnt, U64ToBytes(s.accessCnt))
-	s.accessCnt++
-	s.updateIndexAccess(index)
+	batch.Put(getAccessPrefix(entrytype), U64ToBytes(s.cursor[entrytype-2].access))
+	s.cursor[entrytype-2].access++
 	idata = encodeIndex(index)
 	batch.Put(ikey, idata)
 
@@ -488,27 +552,29 @@ func (s *DbStore) tryAccessIdx(ikey []byte, index *dpaDBIndex) bool {
 	return true
 }
 
-func (s *DbStore) Get(key Key) (chunk *Chunk, err error) {
+func (s *DbStore) Get(key Key, entrytype uint8) (chunk *Chunk, err error) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
 	var index dpaDBIndex
 
-	if s.tryAccessIdx(getIndexKey(key), &index) {
+	if s.tryAccessIdx(getIndexKey(key, entrytype), &index, entrytype) {
 		var data []byte
-		data, err = s.db.Get(getDataKey(index.Idx))
+		data, err = s.db.Get(getDataKey(index.Idx, entrytype))
 		if err != nil {
 			log.Trace(fmt.Sprintf("DBStore: Chunk %v found but could not be accessed: %v", key.Log(), err))
-			s.delete(index.Idx, getIndexKey(key))
+			s.delete(index.Idx, getIndexKey(key, entrytype), entrytype)
 			return
 		}
 
-		hasher := s.hashfunc()
-		hasher.Write(data)
-		hash := hasher.Sum(nil)
-		if !bytes.Equal(hash, key) {
-			s.delete(index.Idx, getIndexKey(key))
-			log.Warn("Invalid Chunk in Database. Please repair with command: 'swarm cleandb'")
+		if entrytype == DB_DATA {
+			hasher := s.hashfunc()
+			hasher.Write(data)
+			hash := hasher.Sum(nil)
+			if !bytes.Equal(hash, key) {
+				s.delete(index.Idx, getIndexKey(key, entrytype), entrytype)
+				log.Warn("Invalid Chunk in Database. Please repair with command: 'swarm cleandb'")
+			}
 		}
 
 		chunk = &Chunk{
@@ -523,13 +589,14 @@ func (s *DbStore) Get(key Key) (chunk *Chunk, err error) {
 
 }
 
-func (s *DbStore) updateAccessCnt(key Key) {
+func (s *DbStore) updateAccessCnt(key Key, entrytype uint8) {
 
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
 	var index dpaDBIndex
-	s.tryAccessIdx(getIndexKey(key), &index) // result_chn == nil, only update access cnt
+
+	s.tryAccessIdx(getIndexKey(key, entrytype), &index, entrytype) // result_chn == nil, only update access cnt
 
 }
 
@@ -540,16 +607,21 @@ func (s *DbStore) setCapacity(c uint64) {
 
 	s.capacity = c
 
-	if s.entryCnt > c {
-		ratio := float32(1.01) - float32(c)/float32(s.entryCnt)
+	var totalentries uint64
+	for i, cursor := range s.cursor {
+		totalentries += cursor.entry
+	}
+	if totalentries > c {
+		ratio := float32(1.01) - float32(c)/float32(totalentries)
 		if ratio < gcArrayFreeRatio {
 			ratio = gcArrayFreeRatio
 		}
 		if ratio > 1 {
 			ratio = 1
 		}
-		for s.entryCnt > c {
+		for totalentries > c {
 			s.collectGarbage(ratio)
+			break
 		}
 	}
 }
@@ -578,7 +650,7 @@ type dbSyncIterator struct {
 }
 
 // initialises a sync iterator from a syncToken (passed in with the handshake)
-func (self *DbStore) NewSyncIterator(state DbSyncState) (si *dbSyncIterator, err error) {
+func (self *DbStore) NewSyncIterator(state DbSyncState, entrytype uint8) (si *dbSyncIterator, err error) {
 	if state.First > state.Last {
 		return nil, fmt.Errorf("no entries found")
 	}
@@ -586,7 +658,7 @@ func (self *DbStore) NewSyncIterator(state DbSyncState) (si *dbSyncIterator, err
 		it:          self.db.NewIterator(),
 		DbSyncState: state,
 	}
-	si.it.Seek(getIndexKey(state.Start))
+	si.it.Seek(getIndexKey(state.Start, entrytype))
 	return si, nil
 }
 

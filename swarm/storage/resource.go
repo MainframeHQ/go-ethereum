@@ -59,7 +59,7 @@ func (h *ResourceHandler) Set(hash Key, name string) error {
 	key := h.hasher.Sum(nil)
 	chunk := NewChunk(key, nil)
 	chunk.SData = hash
-	h.dpa.Put(chunk)
+	h.dpa.Put(chunk, DB_RESOURCE)
 	h.resources[name].key = key
 	return nil
 }

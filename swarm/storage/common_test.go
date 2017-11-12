@@ -68,7 +68,7 @@ func testStore(m ChunkStore, l int64, branches int64, t *testing.T) {
 	chunkC := make(chan *Chunk)
 	go func() {
 		for chunk := range chunkC {
-			m.Put(chunk)
+			m.Put(chunk, DB_DATA)
 			if chunk.wg != nil {
 				chunk.wg.Done()
 			}
@@ -89,7 +89,7 @@ func testStore(m ChunkStore, l int64, branches int64, t *testing.T) {
 	go func() {
 		for ch := range chunkC {
 			go func(chunk *Chunk) {
-				storedChunk, err := m.Get(chunk.Key)
+				storedChunk, err := m.Get(chunk.Key, DB_DATA)
 				if err == notFound {
 					log.Trace(fmt.Sprintf("chunk '%v' not found", chunk.Key.Log()))
 				} else if err != nil {

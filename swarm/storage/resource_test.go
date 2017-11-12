@@ -39,7 +39,7 @@ func TestResourceHandler(t *testing.T) {
 	stack.Start()
 	defer stack.Stop()
 
-	d, err := NewLocalDPA(datadir)
+	d, err := NewLocalDPA(datadir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestResourceHandler(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	chunk, err := d.Get(rh.Get("foo"))
+	chunk, err := d.Get(rh.Get("foo"), DB_DATA)
 	if err != nil {
 		t.Fatal(err)
 	}

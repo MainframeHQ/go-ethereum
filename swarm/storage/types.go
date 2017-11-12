@@ -173,8 +173,8 @@ The ChunkStore interface is implemented by :
 - DPA: local requests for swarm storage and retrieval
 */
 type ChunkStore interface {
-	Put(*Chunk) // effectively there is no error even if there is an error
-	Get(Key) (*Chunk, error)
+	Put(*Chunk, uint8) // effectively there is no error even if there is an error
+	Get(Key, uint8) (*Chunk, error)
 	Close()
 }
 
