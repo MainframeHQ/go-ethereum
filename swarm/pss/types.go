@@ -1,10 +1,8 @@
 package pss
 
 import (
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -32,7 +30,7 @@ func (t *Topic) Unmarshal(input []byte) error {
 }
 
 func (t Topic) MarshalJSON() (b []byte, err error) {
-	return json.Marshal(hex.EncodeToString(t[:]))
+	return json.Marshal(hexutil.Encode(t[:]))
 }
 
 func (t *Topic) UnmarshalJSON(input []byte) error {
@@ -48,8 +46,7 @@ func (t *Topic) UnmarshalJSON(input []byte) error {
 type PssAddress []byte
 
 func (a PssAddress) MarshalJSON() ([]byte, error) {
-	s := strings.Join([]string{"\"", hexutil.Encode((a)[:]), "\""}, "")
-	return []byte(s), nil
+	return json.Marshal(hexutil.Encode(a[:]))
 }
 
 func (a *PssAddress) UnmarshalJSON(input []byte) error {
