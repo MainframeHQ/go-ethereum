@@ -198,7 +198,7 @@ func (self *Pss) Protocols() []p2p.Protocol {
 func (self *Pss) Run(p *p2p.Peer, rw p2p.MsgReadWriter) error {
 	pp := protocols.NewPeer(p, rw, pssSpec)
 	self.fwdPool[p.Info().ID] = pp
-	return pp.Run(self.handlePssMsg)
+	return pp.Run(self.handlePssMsg(p))
 }
 
 func (self *Pss) APIs() []rpc.API {
@@ -278,7 +278,9 @@ func (self *Pss) getHandlers(topic Topic) map[*Handler]bool {
 // Check if address partially matches
 // If yes, it CAN be for us, and we process it
 // Passes error to pss protocol handler if payload is not valid pssmsg
-func (self *Pss) handlePssMsg(msg interface{}) error {
+func (self *Pss) handlePssMsg(p *p2p.Peer) func(interface{}) error {
+
+	return func(msg interface{}) error {
 	pssmsg, ok := msg.(*PssMsg)
 	if ok {
 		var err error
@@ -295,19 +297,20 @@ func (self *Pss) handlePssMsg(msg interface{}) error {
 		}
 		log.Trace("pss for us, yay! ... let's process!", "pss", common.ToHex(self.BaseAddr()))
 
-		if !self.process(pssmsg) {
+		if !self.process(p, pssmsg) {
 			err = self.forward(pssmsg)
 		}
 		return err
 	}
 
 	return fmt.Errorf("invalid message type. Expected *PssMsg, got %T ", msg)
+	}
 }
 
 // Entry point to processing a message for which the current node can be the intended recipient.
 // Attempts symmetric and asymmetric decryption with stored keys.
 // Dispatches message to all handlers matching the message topic
-func (self *Pss) process(pssmsg *PssMsg) bool {
+func (self *Pss) process(peer *p2p.Peer, pssmsg *PssMsg) bool {
 	var err error
 	var recvmsg *whisper.ReceivedMessage
 	var from *PssAddress
@@ -326,7 +329,7 @@ func (self *Pss) process(pssmsg *PssMsg) bool {
 	}
 	recvmsg, keyid, from, err = keyFunc(envelope)
 	if err != nil {
-		log.Debug("decrypt message fail", "err", err, "asym", asymmetric, "pss", common.ToHex(self.BaseAddr()))
+		log.Debug("decrypt message fail", "err", err, "asym", asymmetric, "pss", common.ToHex(self.BaseAddr()), "peer", peer)
 		return false
 	}
 
