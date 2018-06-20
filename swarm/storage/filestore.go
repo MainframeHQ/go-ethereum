@@ -95,3 +95,8 @@ func (f *FileStore) Store(data io.Reader, size int64, toEncrypt bool) (addr Addr
 func (f *FileStore) HashSize() int {
 	return f.hashFunc().Size()
 }
+
+func (f *FileStore) Append(addr Address, data io.Reader, toEncrypt bool) (newAddr Address, wait func(), err error) {
+	putter := NewHasherStore(f.ChunkStore, f.hashFunc, toEncrypt)
+	return PyramidAppend(addr, data, putter, putter)
+}
